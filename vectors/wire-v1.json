@@ -1,0 +1,9 @@
+{
+  "description": "Gate A host-to-guest IPv4/UDP frame",
+  "version": 1,
+  "flags": 0,
+  "destinationPeer": 2,
+  "sequence": 7,
+  "payloadHex": "4500001c000000004011000064600001646000024a7e4a7e00080000",
+  "encodedHex": "01000002000000074500001c000000004011000064600001646000024a7e4a7e00080000"
+}

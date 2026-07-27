@@ -1,0 +1,26 @@
+[package]
+name = "flipple-multiplayer-relay"
+version = "0.1.0"
+edition = "2024"
+license = "Proprietary"
+publish = false
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+bytes = "1.10"
+clap = { version = "4.5", features = ["derive", "env"] }
+ed25519-dalek = "2.2"
+quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+rustls-pemfile = "2.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.47", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+rcgen = "0.14"
+tempfile = "3.20"
+
