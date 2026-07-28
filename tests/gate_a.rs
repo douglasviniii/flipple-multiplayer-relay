@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use ed25519_dalek::{Signer, SigningKey};
 use flipple_multiplayer_relay::PROTOCOL_VERSION;
 use flipple_multiplayer_relay::auth::{
@@ -18,6 +19,45 @@ use tokio::time::timeout;
 
 const KEY_ID: &str = "gate-a-2026-01";
 const SIGNING_KEY: [u8; 32] = [0x42; 32];
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeTicketFixture {
+    generated_by: String,
+    public_key: String,
+    token: String,
+}
+
+#[test]
+fn accepts_node_crypto_ed25519_ticket_contract() {
+    let fixture: NodeTicketFixture =
+        serde_json::from_str(include_str!("fixtures/node-ed25519-ticket.json")).unwrap();
+    assert_eq!(fixture.generated_by, "node:crypto");
+
+    let public_key: [u8; 32] = URL_SAFE_NO_PAD
+        .decode(fixture.public_key)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let segments: Vec<_> = fixture.token.split('.').collect();
+    assert_eq!(segments.len(), 3);
+    let signature = Signature::from_slice(&URL_SAFE_NO_PAD.decode(segments[2]).unwrap()).unwrap();
+    VerifyingKey::from_bytes(&public_key)
+        .unwrap()
+        .verify(
+            format!("{}.{}", segments[0], segments[1]).as_bytes(),
+            &signature,
+        )
+        .unwrap();
+
+    let claims: TicketClaims =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(segments[1]).unwrap()).unwrap();
+    assert_eq!(claims.room_id, "node-contract-room");
+    assert_eq!(claims.peer_id, 1);
+    assert_eq!(claims.role, "host");
+    assert_eq!(claims.virtual_ip, "100.96.0.1");
+    assert_eq!(claims.protocol_version, PROTOCOL_VERSION);
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gate_a_routes_raw_ip_datagrams_in_both_directions() {

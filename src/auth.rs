@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -39,7 +39,7 @@ pub struct TicketClaims {
 pub struct TicketVerifier {
     key_id: Arc<str>,
     key: VerifyingKey,
-    used_jtis: Arc<Mutex<HashSet<String>>>,
+    used_jtis: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl TicketVerifier {
@@ -47,7 +47,7 @@ impl TicketVerifier {
         Ok(Self {
             key_id: key_id.into(),
             key: VerifyingKey::from_bytes(&public_key).context("invalid Ed25519 public key")?,
-            used_jtis: Arc::new(Mutex::new(HashSet::new())),
+            used_jtis: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -79,11 +79,18 @@ impl TicketVerifier {
 
         let claims: TicketClaims = decode_json(encoded_claims).context("invalid ticket claims")?;
         validate_claims(&claims)?;
+        let now = unix_timestamp()?;
         let mut used_jtis = self.used_jtis.lock().await;
-        if !used_jtis.insert(claims.jti.clone()) {
+        used_jtis.retain(|_, expires_at| *expires_at > now);
+        if used_jtis.insert(claims.jti.clone(), claims.exp).is_some() {
             bail!("ticket was already consumed");
         }
         Ok(claims)
+    }
+
+    #[cfg(test)]
+    async fn used_ticket_count(&self) -> usize {
+        self.used_jtis.lock().await.len()
     }
 }
 
@@ -95,10 +102,7 @@ fn decode_json<T: for<'de> Deserialize<'de>>(encoded: &str) -> Result<T> {
 }
 
 fn validate_claims(claims: &TicketClaims) -> Result<()> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock is before Unix epoch")?
-        .as_secs();
+    let now = unix_timestamp()?;
     if claims.iss != EXPECTED_ISSUER || claims.aud != EXPECTED_AUDIENCE {
         bail!("ticket issuer or audience is invalid");
     }
@@ -123,6 +127,13 @@ fn validate_claims(claims: &TicketClaims) -> Result<()> {
         ("host", 1, "100.96.0.1") | ("guest", 2, "100.96.0.2") => Ok(()),
         _ => bail!("ticket role, peer id, and virtual IP do not match the POC contract"),
     }
+}
+
+fn unix_timestamp() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_secs())
 }
 
 #[cfg(test)]
@@ -191,5 +202,33 @@ mod tests {
                 .to_string()
                 .contains("already consumed")
         );
+    }
+
+    #[tokio::test]
+    async fn discards_consumed_ticket_ids_after_expiration() {
+        let now = unix_timestamp().unwrap();
+        let verifier = verifier();
+        let first = TicketClaims {
+            iss: EXPECTED_ISSUER.into(),
+            aud: EXPECTED_AUDIENCE.into(),
+            room_id: "gate-a-room".into(),
+            peer_id: 1,
+            role: "host".into(),
+            virtual_ip: "100.96.0.1".into(),
+            exp: now + 1,
+            jti: "expiring-ticket".into(),
+            protocol_version: PROTOCOL_VERSION,
+        };
+        verifier.verify_once(&sign(&first)).await.unwrap();
+        assert_eq!(verifier.used_ticket_count().await, 1);
+
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let second = TicketClaims {
+            exp: unix_timestamp().unwrap() + 120,
+            jti: "fresh-ticket".into(),
+            ..first
+        };
+        verifier.verify_once(&sign(&second)).await.unwrap();
+        assert_eq!(verifier.used_ticket_count().await, 1);
     }
 }
