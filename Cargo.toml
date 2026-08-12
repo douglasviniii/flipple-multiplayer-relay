@@ -5,6 +5,9 @@ edition = "2024"
 license = "Proprietary"
 publish = false
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 anyhow = "1.0"
 base64 = "0.22"
@@ -20,6 +23,9 @@ tokio = { version = "1.47", features = ["macros", "net", "rt-multi-thread", "sig
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 webpki-roots = "1.0"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
 
 [dev-dependencies]
 rcgen = "0.14"

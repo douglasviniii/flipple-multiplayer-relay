@@ -18,6 +18,7 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(8);
 /// Android must call `VpnService.protect(fd)` on `socket` before passing ownership
 /// to this constructor. This type deliberately does not create its own socket so a
 /// tunnel transport can never accidentally route itself back through the TUN.
+#[derive(Clone)]
 pub struct RelayClient {
     endpoint: Endpoint,
     connection: Connection,
