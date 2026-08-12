@@ -13,6 +13,7 @@ use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jbyteArray, jint, jlong, jstring};
 use tokio::runtime::Runtime;
 use tokio::time::timeout;
 
+use crate::PROTOCOL_VERSION;
 use crate::client::RelayClient;
 use crate::tls;
 
@@ -87,6 +88,14 @@ fn cloned_session(handle: jlong) -> Result<(Arc<Runtime>, RelayClient)> {
         .get(&handle)
         .context("relay session is not active")?;
     Ok((Arc::clone(&session.runtime), session.client.clone()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_seuapp_flipplearcade_MinecraftRelayNative_nativeProtocolVersion(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jint {
+    jint::from(PROTOCOL_VERSION)
 }
 
 #[unsafe(no_mangle)]
