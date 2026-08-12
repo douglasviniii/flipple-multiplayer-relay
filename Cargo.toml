@@ -19,8 +19,8 @@ thiserror = "2.0"
 tokio = { version = "1.47", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+webpki-roots = "1.0"
 
 [dev-dependencies]
 rcgen = "0.14"
 tempfile = "3.20"
-

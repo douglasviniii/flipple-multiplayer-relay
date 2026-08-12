@@ -54,6 +54,16 @@ pub fn client_config(root: CertificateDer<'static>) -> Result<ClientConfig> {
     roots
         .add(root)
         .context("add relay certificate to trust store")?;
+    client_config_with_roots(roots)
+}
+
+pub fn public_client_config() -> Result<ClientConfig> {
+    let roots =
+        quinn::rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    client_config_with_roots(roots)
+}
+
+fn client_config_with_roots(roots: quinn::rustls::RootCertStore) -> Result<ClientConfig> {
     let mut tls = quinn::rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();

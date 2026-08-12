@@ -10,6 +10,7 @@ use flipple_multiplayer_relay::PROTOCOL_VERSION;
 use flipple_multiplayer_relay::auth::{
     EXPECTED_AUDIENCE, EXPECTED_ISSUER, TicketClaims, TicketHeader, TicketVerifier,
 };
+use flipple_multiplayer_relay::client::RelayClient;
 use flipple_multiplayer_relay::relay::{Relay, authenticate_client};
 use flipple_multiplayer_relay::tls;
 use flipple_multiplayer_relay::wire::WireFrame;
@@ -109,6 +110,69 @@ async fn gate_a_routes_raw_ip_datagrams_in_both_directions() {
     relay_task.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn client_core_uses_caller_owned_udp_sockets_bidirectionally() {
+    let signing_key = SigningKey::from_bytes(&SIGNING_KEY);
+    let verifier = TicketVerifier::new(KEY_ID, signing_key.verifying_key().to_bytes()).unwrap();
+    let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let certificate_der = CertificateDer::from(certificate.cert);
+    let private_key = PrivatePkcs8KeyDer::from(certificate.signing_key.serialize_der());
+    let server = Endpoint::server(
+        tls::server_config(vec![certificate_der.clone()], private_key.into()).unwrap(),
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+    )
+    .unwrap();
+    let relay_address = server.local_addr().unwrap();
+    let relay_task = tokio::spawn(Relay::new(verifier).serve(server));
+
+    let host = RelayClient::connect(
+        std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap(),
+        relay_address,
+        "localhost",
+        ticket_for_peer(1),
+        tls::client_config(certificate_der.clone()).unwrap(),
+    )
+    .await
+    .unwrap();
+    let guest = RelayClient::connect(
+        std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap(),
+        relay_address,
+        "localhost",
+        ticket_for_peer(2),
+        tls::client_config(certificate_der).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let outbound = Bytes::from_static(&[
+        0x45, 0, 0, 0x1c, 0, 2, 0, 0, 0x40, 0x11, 0, 0, 100, 96, 0, 1, 100, 96, 0, 2, 0x4a, 0x7e,
+        0x4a, 0x7e, 0, 8, 0, 0,
+    ]);
+    host.send_packet(2, 11, outbound.clone()).unwrap();
+    let received = timeout(Duration::from_secs(2), guest.receive_packet())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received.payload, outbound);
+    assert_eq!(received.dst_peer, 2);
+
+    let response = Bytes::from_static(&[
+        0x45, 0, 0, 0x1c, 0, 3, 0, 0, 0x40, 0x11, 0, 0, 100, 96, 0, 2, 100, 96, 0, 1, 0x4a, 0x7e,
+        0x4a, 0x7e, 0, 8, 0, 0,
+    ]);
+    guest.send_packet(1, 12, response.clone()).unwrap();
+    let received = timeout(Duration::from_secs(2), host.receive_packet())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received.payload, response);
+    assert_eq!(received.dst_peer, 1);
+
+    host.close();
+    guest.close();
+    relay_task.abort();
+}
+
 async fn connect_peer(
     relay_address: SocketAddr,
     certificate: CertificateDer<'static>,
@@ -162,4 +226,28 @@ fn sign_ticket(claims: TicketClaims) -> String {
         "{signing_input}.{}",
         URL_SAFE_NO_PAD.encode(signature.to_bytes())
     )
+}
+
+fn ticket_for_peer(peer_id: u16) -> String {
+    let role = if peer_id == 1 { "host" } else { "guest" };
+    let virtual_ip = if peer_id == 1 {
+        "100.96.0.1"
+    } else {
+        "100.96.0.2"
+    };
+    sign_ticket(TicketClaims {
+        iss: EXPECTED_ISSUER.into(),
+        aud: EXPECTED_AUDIENCE.into(),
+        room_id: "gate-a-client-core".into(),
+        peer_id,
+        role: role.into(),
+        virtual_ip: virtual_ip.into(),
+        exp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 120,
+        jti: format!("gate-a-client-peer-{peer_id}"),
+        protocol_version: PROTOCOL_VERSION,
+    })
 }

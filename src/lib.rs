@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod client;
 pub mod relay;
 pub mod tls;
 pub mod wire;
