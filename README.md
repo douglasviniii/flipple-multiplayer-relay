@@ -41,3 +41,6 @@ cargo run --release -- `
 Never commit TLS private keys, ticket signing keys, tokens, packet captures, or environment
 files. See `contracts/` for the frozen Gate A protocol.
 
+The hardened systemd template for a future dedicated Linux VM lives in
+`deploy/`. It is preparation only and is not authorization to expose the relay
+or enable the app feature.
