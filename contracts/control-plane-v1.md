@@ -6,6 +6,10 @@ Status: API contract for the hidden POC. Endpoints are disabled unless
 The Next/PostgreSQL control plane owns room state and signs short-lived Ed25519 tickets. The
 relay receives only a public key and never queries PostgreSQL in the packet path.
 
+Each active room owns one unique `/30` from `100.96.0.0/16`. Peer 1 receives
+the first usable address and peer 2 the second. Closed or expired room subnets
+may be reused after the control plane marks the previous room inactive.
+
 ## Endpoints
 
 - `POST /api/v1/multiplayer/rooms`: create a room and host ticket.
@@ -20,4 +24,3 @@ packets, residential addresses, or packet captures.
 The relay ticket is a compact JWT with `alg=EdDSA`, `typ=JWT`, a rotating `kid`, issuer
 `flipple-control-plane`, audience `flipple-multiplayer-relay`, and the claims listed in
 `wire-v1.md`. Production private signing keys must not enter this repository or the relay host.
-

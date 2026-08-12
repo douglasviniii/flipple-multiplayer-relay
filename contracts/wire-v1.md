@@ -45,5 +45,6 @@ The relay verifies the signature, claims, expiry, role mapping, and one-time `jt
 ```
 
 Ticket claims: `iss`, `aud`, `room_id`, `peer_id`, `role`, `virtual_ip`, `exp`, `jti`, and
-`protocol_version`. Gate A accepts only host peer 1 at `100.96.0.1` and guest peer 2 at
-`100.96.0.2`. Tickets live for at most five minutes and are consumed once.
+`protocol_version`. The control plane assigns a unique room `/30` from `100.96.0.0/16`:
+host peer 1 uses offset `+1` and guest peer 2 uses offset `+2`. Tickets live for at most
+five minutes and are consumed once.

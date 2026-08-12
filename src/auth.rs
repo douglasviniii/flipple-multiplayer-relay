@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -119,14 +120,20 @@ fn validate_claims(claims: &TicketClaims) -> Result<()> {
     {
         bail!("ticket identifiers are invalid");
     }
-    match (
-        claims.role.as_str(),
-        claims.peer_id,
-        claims.virtual_ip.as_str(),
-    ) {
-        ("host", 1, "100.96.0.1") | ("guest", 2, "100.96.0.2") => Ok(()),
-        _ => bail!("ticket role, peer id, and virtual IP do not match the POC contract"),
+    let virtual_ip: Ipv4Addr = claims
+        .virtual_ip
+        .parse()
+        .context("ticket virtual IP is not IPv4")?;
+    let octets = virtual_ip.octets();
+    let expected_offset = match (claims.role.as_str(), claims.peer_id) {
+        ("host", 1) => 1,
+        ("guest", 2) => 2,
+        _ => bail!("ticket role and peer id do not match the POC contract"),
+    };
+    if octets[0] != 100 || octets[1] != 96 || octets[3] % 4 != expected_offset {
+        bail!("ticket virtual IP does not match its room /30 assignment");
     }
+    Ok(())
 }
 
 fn unix_timestamp() -> Result<u64> {
@@ -230,5 +237,40 @@ mod tests {
         };
         verifier.verify_once(&sign(&second)).await.unwrap();
         assert_eq!(verifier.used_ticket_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn accepts_room_specific_subnets_and_rejects_wrong_peer_offsets() {
+        let now = unix_timestamp().unwrap();
+        let verifier = verifier();
+        let valid = TicketClaims {
+            iss: EXPECTED_ISSUER.into(),
+            aud: EXPECTED_AUDIENCE.into(),
+            room_id: "room-specific-subnet".into(),
+            peer_id: 2,
+            role: "guest".into(),
+            virtual_ip: "100.96.73.246".into(),
+            exp: now + 120,
+            jti: "room-specific-valid".into(),
+            protocol_version: PROTOCOL_VERSION,
+        };
+        assert_eq!(
+            verifier.verify_once(&sign(&valid)).await.unwrap().peer_id,
+            2
+        );
+
+        let invalid = TicketClaims {
+            virtual_ip: "100.96.73.245".into(),
+            jti: "room-specific-invalid".into(),
+            ..valid
+        };
+        assert!(
+            verifier
+                .verify_once(&sign(&invalid))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("/30 assignment")
+        );
     }
 }
