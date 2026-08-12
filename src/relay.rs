@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use quinn::{Connection, Endpoint, VarInt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::auth::{MAX_TICKET_LEN, TicketClaims, TicketVerifier};
@@ -71,9 +73,27 @@ impl Relay {
         self.register(&claims, &connection).await?;
         let stable_id = connection.stable_id();
         info!(room_id = %claims.room_id, peer_id = claims.peer_id, "peer authenticated");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before Unix epoch")?
+            .as_secs();
+        let ticket_lifetime = claims.exp.saturating_sub(now);
+        if ticket_lifetime == 0 {
+            bail!("ticket expired before relay registration");
+        }
+        let ticket_expiration = sleep(Duration::from_secs(ticket_lifetime));
+        tokio::pin!(ticket_expiration);
 
         loop {
-            match connection.read_datagram().await {
+            let datagram = tokio::select! {
+                _ = &mut ticket_expiration => {
+                    info!(room_id = %claims.room_id, peer_id = claims.peer_id, "ticket lifetime ended");
+                    connection.close(VarInt::from_u32(3), b"ticket expired");
+                    break;
+                }
+                datagram = connection.read_datagram() => datagram,
+            };
+            match datagram {
                 Ok(encoded) => {
                     let frame = match WireFrame::decode(encoded.clone()) {
                         Ok(frame) => frame,

@@ -173,6 +173,46 @@ async fn client_core_uses_caller_owned_udp_sockets_bidirectionally() {
     relay_task.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relay_closes_an_authenticated_connection_when_its_ticket_expires() {
+    let signing_key = SigningKey::from_bytes(&SIGNING_KEY);
+    let verifier = TicketVerifier::new(KEY_ID, signing_key.verifying_key().to_bytes()).unwrap();
+    let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let certificate_der = CertificateDer::from(certificate.cert);
+    let private_key = PrivatePkcs8KeyDer::from(certificate.signing_key.serialize_der());
+    let server = Endpoint::server(
+        tls::server_config(vec![certificate_der.clone()], private_key.into()).unwrap(),
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+    )
+    .unwrap();
+    let relay_address = server.local_addr().unwrap();
+    let relay_task = tokio::spawn(Relay::new(verifier).serve(server));
+
+    let mut endpoint = Endpoint::client(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+    endpoint.set_default_client_config(tls::client_config(certificate_der).unwrap());
+    let connection = endpoint
+        .connect(relay_address, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+    let ticket = sign_ticket(TicketClaims {
+        exp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 2,
+        jti: "short-lived-gate-a-ticket".into(),
+        ..claims_for_peer(1, "gate-a-expiration")
+    });
+    authenticate_client(&connection, ticket).await.unwrap();
+
+    timeout(Duration::from_secs(4), connection.closed())
+        .await
+        .expect("relay kept an expired authenticated connection open");
+    endpoint.wait_idle().await;
+    relay_task.abort();
+}
+
 async fn connect_peer(
     relay_address: SocketAddr,
     certificate: CertificateDer<'static>,
@@ -229,25 +269,33 @@ fn sign_ticket(claims: TicketClaims) -> String {
 }
 
 fn ticket_for_peer(peer_id: u16) -> String {
-    let role = if peer_id == 1 { "host" } else { "guest" };
-    let virtual_ip = if peer_id == 1 {
-        "100.96.0.1"
-    } else {
-        "100.96.0.2"
-    };
     sign_ticket(TicketClaims {
-        iss: EXPECTED_ISSUER.into(),
-        aud: EXPECTED_AUDIENCE.into(),
-        room_id: "gate-a-client-core".into(),
-        peer_id,
-        role: role.into(),
-        virtual_ip: virtual_ip.into(),
         exp: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs()
             + 120,
         jti: format!("gate-a-client-peer-{peer_id}"),
-        protocol_version: PROTOCOL_VERSION,
+        ..claims_for_peer(peer_id, "gate-a-client-core")
     })
+}
+
+fn claims_for_peer(peer_id: u16, room_id: &str) -> TicketClaims {
+    let role = if peer_id == 1 { "host" } else { "guest" };
+    let virtual_ip = if peer_id == 1 {
+        "100.96.0.1"
+    } else {
+        "100.96.0.2"
+    };
+    TicketClaims {
+        iss: EXPECTED_ISSUER.into(),
+        aud: EXPECTED_AUDIENCE.into(),
+        room_id: room_id.into(),
+        peer_id,
+        role: role.into(),
+        virtual_ip: virtual_ip.into(),
+        exp: 0,
+        jti: String::new(),
+        protocol_version: PROTOCOL_VERSION,
+    }
 }
