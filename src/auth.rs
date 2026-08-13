@@ -146,7 +146,7 @@ pub fn peer_id_for_ip(ip: Ipv4Addr) -> Result<u32> {
     }
     let peer_id =
         (u32::from(octets[1] - 64) << 16) | (u32::from(octets[2]) << 8) | u32::from(octets[3]);
-    if peer_id == 0 || peer_id > 4_194_302 {
+    if peer_id == 0 || peer_id > 4_194_047 {
         bail!("virtual IP is reserved");
     }
     Ok(peer_id)
@@ -298,6 +298,21 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("network peer id")
+        );
+
+        let reserved_probe = TicketClaims {
+            peer_id: 4_194_049,
+            virtual_ip: "100.127.255.1".into(),
+            jti: "reserved-probe-address".into(),
+            ..valid
+        };
+        assert!(
+            verifier
+                .verify_once(&sign(&reserved_probe))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("reserved")
         );
     }
 }
