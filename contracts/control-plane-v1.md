@@ -1,4 +1,7 @@
-# Control plane contract v1
+# Control plane contract v1 (superseded)
+
+This manual room/invite contract is retained only for audit history. The
+automatic virtual-network product uses `control-plane-v2.md`.
 
 Status: API contract for the hidden POC. Endpoints are disabled unless
 `MULTIPLAYER_POC_ENABLED=true`.

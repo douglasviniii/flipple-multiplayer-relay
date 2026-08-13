@@ -153,7 +153,7 @@ pub extern "system" fn Java_com_seuapp_flipplearcade_MinecraftRelayNative_native
 ) -> jboolean {
     let result = (|| -> Result<()> {
         let (_, client) = cloned_session(handle)?;
-        let destination_peer = u16::try_from(destination_peer).context("peer id is invalid")?;
+        let destination_peer = u32::try_from(destination_peer).context("peer id is invalid")?;
         let packet = env
             .convert_byte_array(packet)
             .context("read raw IP packet")?;
@@ -206,8 +206,8 @@ pub extern "system" fn Java_com_seuapp_flipplearcade_MinecraftRelayNative_native
     handle: jlong,
 ) -> jstring {
     match cloned_session(handle).and_then(|(_, client)| {
-        env.new_string(client.room_id())
-            .context("create room id Java string")
+        env.new_string(client.network_id())
+            .context("create network id Java string")
     }) {
         Ok(value) => value.into_raw(),
         Err(error) => {
@@ -224,7 +224,13 @@ pub extern "system" fn Java_com_seuapp_flipplearcade_MinecraftRelayNative_native
     handle: jlong,
 ) -> jint {
     match cloned_session(handle) {
-        Ok((_, client)) => jint::from(client.peer_id()),
+        Ok((_, client)) => match i32::try_from(client.peer_id()) {
+            Ok(peer_id) => peer_id,
+            Err(error) => {
+                throw(&mut env, error);
+                0
+            }
+        },
         Err(error) => {
             throw(&mut env, error);
             0

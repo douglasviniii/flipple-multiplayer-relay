@@ -3,19 +3,21 @@
 Private relay for the hidden Minecraft Bedrock LAN-over-QUIC proof of concept.
 
 This repository does not run a Bedrock server. It routes encrypted, authenticated raw IP
-datagrams between one host Android and one guest Android. The world remains hosted by Minecraft
-on the host phone.
+datagrams between Android devices connected to the same Flipple virtual network. The world
+remains hosted by Minecraft on the host phone; users never create a relay room manually.
 
 ## Current scope
 
-- Wire protocol v1 with deterministic unit tests.
+- Wire protocol v2 with deterministic unit tests.
 - Ed25519 compact JWT verification with one-time `jti`.
 - QUIC/TLS 1.3 relay using Quinn and rustls.
-- Maximum two peers per room and no persistence of packet payloads.
+- Multi-peer routing by authenticated virtual IPv4 address, with no persistence of packet payloads.
+- Source-address anti-spoofing and Minecraft Bedrock UDP-port filtering.
 - Local Gate A harness before any VM or DNS deployment.
 
-Not implemented yet: Android Rust/JNI client, RakNet discovery synthesis, Next/PostgreSQL control
-plane, public VM, DNS, production certificates, metrics endpoint, or Google Play enablement.
+Implemented locally: Android Rust/JNI client core and a PostgreSQL control-plane contract. Still
+pending: RakNet discovery synthesis, public VM, DNS, production certificates, metrics endpoint,
+two-device gameplay validation, and Google Play enablement.
 
 ## Development
 
@@ -39,7 +41,7 @@ cargo run --release -- `
 ```
 
 Never commit TLS private keys, ticket signing keys, tokens, packet captures, or environment
-files. See `contracts/` for the frozen Gate A protocol.
+files. Protocol v2 supersedes the original two-peer Gate A contract.
 
 The hardened systemd template for a future dedicated Linux VM lives in
 `deploy/`. It is preparation only and is not authorization to expose the relay

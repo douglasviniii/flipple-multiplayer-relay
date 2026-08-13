@@ -1,4 +1,7 @@
-# Flipple Minecraft relay wire protocol v1
+# Flipple Minecraft relay wire protocol v1 (superseded)
+
+This two-peer room contract is retained only for audit history. New clients use
+`wire-v2.md`; v1 must not be deployed or enabled.
 
 Status: frozen for Gate A on 27 July 2026. It is not a production protocol yet.
 

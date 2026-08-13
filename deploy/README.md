@@ -40,5 +40,5 @@ sudo ss -lunp | grep ':443'
 ```
 
 Do not enable the app feature from a successful process start alone. Gate A,
-the control-plane ticket exchange, two-device Gate B and the later RakNet/game
+the persistent-network ticket exchange, two-device Gate B and the later RakNet/game
 gates must pass against the exact deployed commit first.

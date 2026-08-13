@@ -16,13 +16,14 @@ const header = encode({ alg: 'EdDSA', typ: 'JWT', kid: 'gate-a-2026-01' });
 const claims = encode({
   iss: 'flipple-control-plane',
   aud: 'flipple-multiplayer-relay',
-  room_id: 'node-contract-room',
+  network_id: 'public-v1',
+  lease_id: '44444444-4444-4444-8444-444444444444',
   peer_id: 1,
-  role: 'host',
-  virtual_ip: '100.96.0.1',
+  role: 'member',
+  virtual_ip: '100.64.0.1',
   exp: 4_102_444_800,
   jti: 'node-ed25519-contract',
-  protocol_version: 1,
+  protocol_version: 2,
 });
 const signingInput = `${header}.${claims}`;
 const token = `${signingInput}.${crypto

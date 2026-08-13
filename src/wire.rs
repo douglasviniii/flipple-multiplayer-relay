@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use crate::PROTOCOL_VERSION;
 
-pub const HEADER_LEN: usize = 8;
+pub const HEADER_LEN: usize = 10;
 pub const MAX_DATAGRAM_LEN: usize = 1200;
 pub const MAX_PAYLOAD_LEN: usize = MAX_DATAGRAM_LEN - HEADER_LEN;
 pub const FLAG_IP_PACKET: u8 = 0;
@@ -11,14 +11,14 @@ pub const FLAG_IP_PACKET: u8 = 0;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WireFrame {
     pub flags: u8,
-    pub dst_peer: u16,
+    pub dst_peer: u32,
     pub sequence: u32,
     pub payload: Bytes,
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum WireError {
-    #[error("frame is shorter than the 8-byte header")]
+    #[error("frame is shorter than the 10-byte header")]
     TooShort,
     #[error("unsupported protocol version {0}")]
     UnsupportedVersion(u8),
@@ -33,7 +33,7 @@ pub enum WireError {
 }
 
 impl WireFrame {
-    pub fn new(dst_peer: u16, sequence: u32, payload: impl Into<Bytes>) -> Result<Self, WireError> {
+    pub fn new(dst_peer: u32, sequence: u32, payload: impl Into<Bytes>) -> Result<Self, WireError> {
         let frame = Self {
             flags: FLAG_IP_PACKET,
             dst_peer,
@@ -49,7 +49,7 @@ impl WireFrame {
         let mut encoded = BytesMut::with_capacity(HEADER_LEN + self.payload.len());
         encoded.put_u8(PROTOCOL_VERSION);
         encoded.put_u8(self.flags);
-        encoded.put_u16(self.dst_peer);
+        encoded.put_u32(self.dst_peer);
         encoded.put_u32(self.sequence);
         encoded.extend_from_slice(&self.payload);
         Ok(encoded.freeze())
@@ -68,8 +68,8 @@ impl WireFrame {
         }
         let frame = Self {
             flags: encoded[1],
-            dst_peer: u16::from_be_bytes([encoded[2], encoded[3]]),
-            sequence: u32::from_be_bytes([encoded[4], encoded[5], encoded[6], encoded[7]]),
+            dst_peer: u32::from_be_bytes([encoded[2], encoded[3], encoded[4], encoded[5]]),
+            sequence: u32::from_be_bytes([encoded[6], encoded[7], encoded[8], encoded[9]]),
             payload: encoded.slice(HEADER_LEN..),
         };
         frame.validate()?;
@@ -101,7 +101,10 @@ mod tests {
     fn round_trip_uses_network_byte_order() {
         let frame = WireFrame::new(0x1234, 0x89ab_cdef, Bytes::from_static(b"ip-packet")).unwrap();
         let encoded = frame.encode().unwrap();
-        assert_eq!(&encoded[..8], &[1, 0, 0x12, 0x34, 0x89, 0xab, 0xcd, 0xef]);
+        assert_eq!(
+            &encoded[..10],
+            &[2, 0, 0, 0, 0x12, 0x34, 0x89, 0xab, 0xcd, 0xef]
+        );
         assert_eq!(WireFrame::decode(encoded).unwrap(), frame);
     }
 
@@ -127,9 +130,9 @@ mod tests {
         assert_eq!(
             encoded.as_ref(),
             &[
-                0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x07, 0x45, 0x00, 0x00, 0x1c, 0x00, 0x00,
-                0x00, 0x00, 0x40, 0x11, 0x00, 0x00, 0x64, 0x60, 0x00, 0x01, 0x64, 0x60, 0x00, 0x02,
-                0x4a, 0x7e, 0x4a, 0x7e, 0x00, 0x08, 0x00, 0x00,
+                0x02, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x07, 0x45, 0x00, 0x00, 0x1c,
+                0x00, 0x00, 0x00, 0x00, 0x40, 0x11, 0x00, 0x00, 0x64, 0x60, 0x00, 0x01, 0x64, 0x60,
+                0x00, 0x02, 0x4a, 0x7e, 0x4a, 0x7e, 0x00, 0x08, 0x00, 0x00,
             ]
         );
     }

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -10,10 +11,12 @@ use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use crate::auth::{MAX_TICKET_LEN, TicketClaims, TicketVerifier};
+use crate::auth::{MAX_TICKET_LEN, TicketClaims, TicketVerifier, peer_id_for_ip};
 use crate::wire::WireFrame;
 
 const AUTH_STREAM_LIMIT: usize = MAX_TICKET_LEN + 256;
+const MAX_NETWORK_PEERS: usize = 100_000;
+const MINECRAFT_PORTS: [u16; 2] = [19132, 19133];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AuthRequest {
@@ -23,8 +26,8 @@ pub struct AuthRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AuthResponse {
     pub accepted: bool,
-    pub peer_id: u16,
-    pub room_id: String,
+    pub peer_id: u32,
+    pub network_id: String,
 }
 
 #[derive(Clone)]
@@ -33,19 +36,19 @@ struct Peer {
     stable_id: usize,
 }
 
-type Rooms = Arc<RwLock<HashMap<String, HashMap<u16, Peer>>>>;
+type Networks = Arc<RwLock<HashMap<String, HashMap<u32, Peer>>>>;
 
 #[derive(Clone)]
 pub struct Relay {
     verifier: TicketVerifier,
-    rooms: Rooms,
+    networks: Networks,
 }
 
 impl Relay {
     pub fn new(verifier: TicketVerifier) -> Self {
         Self {
             verifier,
-            rooms: Arc::new(RwLock::new(HashMap::new())),
+            networks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -72,7 +75,7 @@ impl Relay {
         let claims = self.authenticate(&connection).await?;
         self.register(&claims, &connection).await?;
         let stable_id = connection.stable_id();
-        info!(room_id = %claims.room_id, peer_id = claims.peer_id, "peer authenticated");
+        info!(network_id = %claims.network_id, peer_id = claims.peer_id, "peer authenticated");
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("system clock is before Unix epoch")?
@@ -87,7 +90,7 @@ impl Relay {
         loop {
             let datagram = tokio::select! {
                 _ = &mut ticket_expiration => {
-                    info!(room_id = %claims.room_id, peer_id = claims.peer_id, "ticket lifetime ended");
+                    info!(network_id = %claims.network_id, peer_id = claims.peer_id, "ticket lifetime ended");
                     connection.close(VarInt::from_u32(3), b"ticket expired");
                     break;
                 }
@@ -98,36 +101,40 @@ impl Relay {
                     let frame = match WireFrame::decode(encoded.clone()) {
                         Ok(frame) => frame,
                         Err(error) => {
-                            warn!(room_id = %claims.room_id, peer_id = claims.peer_id, %error, "invalid frame dropped");
+                            warn!(network_id = %claims.network_id, peer_id = claims.peer_id, %error, "invalid frame dropped");
                             continue;
                         }
                     };
                     if frame.dst_peer == claims.peer_id {
-                        warn!(room_id = %claims.room_id, peer_id = claims.peer_id, "self-directed frame dropped");
+                        warn!(network_id = %claims.network_id, peer_id = claims.peer_id, "self-directed frame dropped");
                         continue;
                     }
-                    let target = self.lookup(&claims.room_id, frame.dst_peer).await;
+                    if let Err(error) = validate_routed_packet(&claims, &frame) {
+                        warn!(network_id = %claims.network_id, peer_id = claims.peer_id, %error, "spoofed or non-Minecraft packet dropped");
+                        continue;
+                    }
+                    let target = self.lookup(&claims.network_id, frame.dst_peer).await;
                     if let Some(target) = target {
                         if target
                             .max_datagram_size()
                             .is_some_and(|limit| encoded.len() <= limit)
                         {
                             if let Err(error) = target.send_datagram(encoded) {
-                                debug!(room_id = %claims.room_id, dst_peer = frame.dst_peer, %error, "datagram dropped by QUIC send buffer");
+                                debug!(network_id = %claims.network_id, dst_peer = frame.dst_peer, %error, "datagram dropped by QUIC send buffer");
                             }
                         } else {
-                            warn!(room_id = %claims.room_id, dst_peer = frame.dst_peer, "peer does not support this datagram size");
+                            warn!(network_id = %claims.network_id, dst_peer = frame.dst_peer, "peer does not support this datagram size");
                         }
                     }
                 }
                 Err(error) => {
-                    debug!(room_id = %claims.room_id, peer_id = claims.peer_id, %error, "peer disconnected");
+                    debug!(network_id = %claims.network_id, peer_id = claims.peer_id, %error, "peer disconnected");
                     break;
                 }
             }
         }
 
-        self.unregister(&claims.room_id, claims.peer_id, stable_id)
+        self.unregister(&claims.network_id, claims.peer_id, stable_id)
             .await;
         Ok(())
     }
@@ -147,7 +154,7 @@ impl Relay {
         let response = AuthResponse {
             accepted: true,
             peer_id: claims.peer_id,
-            room_id: claims.room_id.clone(),
+            network_id: claims.network_id.clone(),
         };
         send.write_all(&serde_json::to_vec(&response)?).await?;
         send.finish()?;
@@ -155,12 +162,12 @@ impl Relay {
     }
 
     async fn register(&self, claims: &TicketClaims, connection: &Connection) -> Result<()> {
-        let mut rooms = self.rooms.write().await;
-        let room = rooms.entry(claims.room_id.clone()).or_default();
-        if room.len() >= 2 && !room.contains_key(&claims.peer_id) {
-            bail!("POC room already has two peers");
+        let mut networks = self.networks.write().await;
+        let network = networks.entry(claims.network_id.clone()).or_default();
+        if network.len() >= MAX_NETWORK_PEERS && !network.contains_key(&claims.peer_id) {
+            bail!("virtual network reached its peer limit");
         }
-        if let Some(previous) = room.insert(
+        if let Some(previous) = network.insert(
             claims.peer_id,
             Peer {
                 connection: connection.clone(),
@@ -174,31 +181,65 @@ impl Relay {
         Ok(())
     }
 
-    async fn lookup(&self, room_id: &str, peer_id: u16) -> Option<Connection> {
-        self.rooms
+    async fn lookup(&self, network_id: &str, peer_id: u32) -> Option<Connection> {
+        self.networks
             .read()
             .await
-            .get(room_id)
-            .and_then(|room| room.get(&peer_id))
+            .get(network_id)
+            .and_then(|network| network.get(&peer_id))
             .map(|peer| peer.connection.clone())
     }
 
-    async fn unregister(&self, room_id: &str, peer_id: u16, stable_id: usize) {
-        let mut rooms = self.rooms.write().await;
-        let mut remove_room = false;
-        if let Some(room) = rooms.get_mut(room_id) {
-            if room
+    async fn unregister(&self, network_id: &str, peer_id: u32, stable_id: usize) {
+        let mut networks = self.networks.write().await;
+        let mut remove_network = false;
+        if let Some(network) = networks.get_mut(network_id) {
+            if network
                 .get(&peer_id)
                 .is_some_and(|peer| peer.stable_id == stable_id)
             {
-                room.remove(&peer_id);
+                network.remove(&peer_id);
             }
-            remove_room = room.is_empty();
+            remove_network = network.is_empty();
         }
-        if remove_room {
-            rooms.remove(room_id);
+        if remove_network {
+            networks.remove(network_id);
         }
     }
+}
+
+fn validate_routed_packet(claims: &TicketClaims, frame: &WireFrame) -> Result<()> {
+    let packet = frame.payload.as_ref();
+    if packet.len() < 28 || packet[0] >> 4 != 4 {
+        bail!("payload is not a complete IPv4 UDP packet");
+    }
+    let header_len = usize::from(packet[0] & 0x0f) * 4;
+    if header_len < 20 || packet.len() < header_len + 8 {
+        bail!("IPv4 header length is invalid");
+    }
+    let total_len = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
+    if total_len != packet.len() || packet[9] != 17 {
+        bail!("only complete UDP packets are accepted");
+    }
+    let fragment = u16::from_be_bytes([packet[6], packet[7]]);
+    if fragment & 0x3fff != 0 {
+        bail!("fragmented packets are not accepted");
+    }
+    let source = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
+    let destination = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
+    let claimed_source: Ipv4Addr = claims.virtual_ip.parse().context("ticket IP is invalid")?;
+    if source != claimed_source || peer_id_for_ip(source)? != claims.peer_id {
+        bail!("packet source does not match authenticated peer");
+    }
+    if peer_id_for_ip(destination)? != frame.dst_peer {
+        bail!("packet destination does not match frame destination");
+    }
+    let source_port = u16::from_be_bytes([packet[header_len], packet[header_len + 1]]);
+    let destination_port = u16::from_be_bytes([packet[header_len + 2], packet[header_len + 3]]);
+    if !MINECRAFT_PORTS.contains(&source_port) && !MINECRAFT_PORTS.contains(&destination_port) {
+        bail!("packet is not using a Minecraft Bedrock LAN port");
+    }
+    Ok(())
 }
 
 pub async fn authenticate_client(connection: &Connection, ticket: String) -> Result<AuthResponse> {

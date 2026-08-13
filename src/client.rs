@@ -22,8 +22,8 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(8);
 pub struct RelayClient {
     endpoint: Endpoint,
     connection: Connection,
-    room_id: String,
-    peer_id: u16,
+    network_id: String,
+    peer_id: u32,
 }
 
 impl RelayClient {
@@ -65,20 +65,20 @@ impl RelayClient {
         Ok(Self {
             endpoint,
             connection,
-            room_id: auth.room_id,
+            network_id: auth.network_id,
             peer_id: auth.peer_id,
         })
     }
 
-    pub fn room_id(&self) -> &str {
-        &self.room_id
+    pub fn network_id(&self) -> &str {
+        &self.network_id
     }
 
-    pub fn peer_id(&self) -> u16 {
+    pub fn peer_id(&self) -> u32 {
         self.peer_id
     }
 
-    pub fn send_packet(&self, destination_peer: u16, sequence: u32, packet: Bytes) -> Result<()> {
+    pub fn send_packet(&self, destination_peer: u32, sequence: u32, packet: Bytes) -> Result<()> {
         if destination_peer == self.peer_id {
             bail!("cannot send a relay packet to the same peer");
         }

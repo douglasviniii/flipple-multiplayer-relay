@@ -27,8 +27,9 @@ pub struct TicketHeader {
 pub struct TicketClaims {
     pub iss: String,
     pub aud: String,
-    pub room_id: String,
-    pub peer_id: u16,
+    pub network_id: String,
+    pub lease_id: String,
+    pub peer_id: u32,
     pub role: String,
     pub virtual_ip: String,
     pub exp: u64,
@@ -113,8 +114,13 @@ fn validate_claims(claims: &TicketClaims) -> Result<()> {
     if claims.protocol_version != PROTOCOL_VERSION {
         bail!("ticket protocol version is not supported");
     }
-    if claims.room_id.is_empty()
-        || claims.room_id.len() > 64
+    if claims.network_id.is_empty()
+        || claims.network_id.len() > 64
+        || !claims
+            .network_id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        || !is_uuid(&claims.lease_id)
         || claims.jti.is_empty()
         || claims.jti.len() > 128
     {
@@ -124,16 +130,34 @@ fn validate_claims(claims: &TicketClaims) -> Result<()> {
         .virtual_ip
         .parse()
         .context("ticket virtual IP is not IPv4")?;
-    let octets = virtual_ip.octets();
-    let expected_offset = match (claims.role.as_str(), claims.peer_id) {
-        ("host", 1) => 1,
-        ("guest", 2) => 2,
-        _ => bail!("ticket role and peer id do not match the POC contract"),
-    };
-    if octets[0] != 100 || octets[1] != 96 || octets[3] % 4 != expected_offset {
-        bail!("ticket virtual IP does not match its room /30 assignment");
+    if claims.role != "member" {
+        bail!("ticket role is not accepted for the virtual network");
+    }
+    if peer_id_for_ip(virtual_ip)? != claims.peer_id {
+        bail!("ticket virtual IP does not match its network peer id");
     }
     Ok(())
+}
+
+pub fn peer_id_for_ip(ip: Ipv4Addr) -> Result<u32> {
+    let octets = ip.octets();
+    if octets[0] != 100 || !(64..=127).contains(&octets[1]) {
+        bail!("virtual IP is outside 100.64.0.0/10");
+    }
+    let peer_id =
+        (u32::from(octets[1] - 64) << 16) | (u32::from(octets[2]) << 8) | u32::from(octets[3]);
+    if peer_id == 0 || peer_id > 4_194_302 {
+        bail!("virtual IP is reserved");
+    }
+    Ok(peer_id)
+}
+
+fn is_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
 }
 
 fn unix_timestamp() -> Result<u64> {
@@ -189,10 +213,11 @@ mod tests {
         let claims = TicketClaims {
             iss: EXPECTED_ISSUER.into(),
             aud: EXPECTED_AUDIENCE.into(),
-            room_id: "gate-a-room".into(),
+            network_id: "public-v1".into(),
+            lease_id: "11111111-1111-4111-8111-111111111111".into(),
             peer_id: 1,
-            role: "host".into(),
-            virtual_ip: "100.96.0.1".into(),
+            role: "member".into(),
+            virtual_ip: "100.64.0.1".into(),
             exp: now + 120,
             jti: "single-use-ticket".into(),
             protocol_version: PROTOCOL_VERSION,
@@ -218,10 +243,11 @@ mod tests {
         let first = TicketClaims {
             iss: EXPECTED_ISSUER.into(),
             aud: EXPECTED_AUDIENCE.into(),
-            room_id: "gate-a-room".into(),
+            network_id: "public-v1".into(),
+            lease_id: "22222222-2222-4222-8222-222222222222".into(),
             peer_id: 1,
-            role: "host".into(),
-            virtual_ip: "100.96.0.1".into(),
+            role: "member".into(),
+            virtual_ip: "100.64.0.1".into(),
             exp: now + 1,
             jti: "expiring-ticket".into(),
             protocol_version: PROTOCOL_VERSION,
@@ -240,27 +266,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepts_room_specific_subnets_and_rejects_wrong_peer_offsets() {
+    async fn accepts_network_ips_and_rejects_peer_id_mismatches() {
         let now = unix_timestamp().unwrap();
         let verifier = verifier();
         let valid = TicketClaims {
             iss: EXPECTED_ISSUER.into(),
             aud: EXPECTED_AUDIENCE.into(),
-            room_id: "room-specific-subnet".into(),
-            peer_id: 2,
-            role: "guest".into(),
-            virtual_ip: "100.96.73.246".into(),
+            network_id: "public-v1".into(),
+            lease_id: "33333333-3333-4333-8333-333333333333".into(),
+            peer_id: 84_470,
+            role: "member".into(),
+            virtual_ip: "100.65.73.246".into(),
             exp: now + 120,
             jti: "room-specific-valid".into(),
             protocol_version: PROTOCOL_VERSION,
         };
         assert_eq!(
             verifier.verify_once(&sign(&valid)).await.unwrap().peer_id,
-            2
+            84_470
         );
 
         let invalid = TicketClaims {
-            virtual_ip: "100.96.73.245".into(),
+            virtual_ip: "100.65.73.245".into(),
             jti: "room-specific-invalid".into(),
             ..valid
         };
@@ -270,7 +297,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("/30 assignment")
+                .contains("network peer id")
         );
     }
 }
