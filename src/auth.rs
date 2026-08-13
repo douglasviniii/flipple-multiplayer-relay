@@ -289,7 +289,7 @@ mod tests {
         let invalid = TicketClaims {
             virtual_ip: "100.65.73.245".into(),
             jti: "room-specific-invalid".into(),
-            ..valid
+            ..valid.clone()
         };
         assert!(
             verifier
