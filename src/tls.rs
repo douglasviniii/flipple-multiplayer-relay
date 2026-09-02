@@ -9,6 +9,8 @@ use quinn::crypto::rustls::QuicServerConfig;
 use quinn::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use quinn::{ClientConfig, ServerConfig, TransportConfig};
 
+const RELAY_INITIAL_MTU: u16 = 1350;
+
 use crate::ALPN;
 
 pub fn load_certificate(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
@@ -43,6 +45,7 @@ pub fn server_config(
     let mut transport = TransportConfig::default();
     transport.max_idle_timeout(Some(Duration::from_secs(30).try_into()?));
     transport.keep_alive_interval(Some(Duration::from_secs(10)));
+    transport.initial_mtu(RELAY_INITIAL_MTU);
     transport.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
     transport.datagram_send_buffer_size(2 * 1024 * 1024);
     config.transport_config(Arc::new(transport));
@@ -74,6 +77,7 @@ fn client_config_with_roots(roots: quinn::rustls::RootCertStore) -> Result<Clien
     let mut transport = TransportConfig::default();
     transport.max_idle_timeout(Some(Duration::from_secs(30).try_into()?));
     transport.keep_alive_interval(Some(Duration::from_secs(10)));
+    transport.initial_mtu(RELAY_INITIAL_MTU);
     transport.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
     transport.datagram_send_buffer_size(2 * 1024 * 1024);
     config.transport_config(Arc::new(transport));

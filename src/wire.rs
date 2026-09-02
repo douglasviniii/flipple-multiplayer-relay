@@ -4,7 +4,13 @@ use thiserror::Error;
 use crate::PROTOCOL_VERSION;
 
 pub const HEADER_LEN: usize = 10;
-pub const MAX_DATAGRAM_LEN: usize = 1200;
+// The Android TUN must use the IPv6 minimum MTU (1280). The relay envelope adds
+// 10 bytes, so the former 1200-byte ceiling rejected valid packets captured
+// from the TUN and tore down the whole multiplayer session.
+//
+// 1350 remains below Quinn's default PMTU discovery upper bound (1452) while
+// leaving room for a complete 1280-byte IP packet plus this wire header.
+pub const MAX_DATAGRAM_LEN: usize = 1350;
 pub const MAX_PAYLOAD_LEN: usize = MAX_DATAGRAM_LEN - HEADER_LEN;
 pub const FLAG_IP_PACKET: u8 = 0;
 
@@ -28,7 +34,7 @@ pub enum WireError {
     InvalidDestination,
     #[error("payload is empty")]
     EmptyPayload,
-    #[error("frame exceeds the 1200-byte POC limit")]
+    #[error("frame exceeds the relay datagram limit")]
     TooLarge,
 }
 
@@ -118,6 +124,12 @@ mod tests {
             WireFrame::new(2, 1, vec![0_u8; MAX_PAYLOAD_LEN + 1]).unwrap_err(),
             WireError::TooLarge,
         );
+    }
+
+    #[test]
+    fn accepts_a_complete_ipv6_minimum_mtu_packet() {
+        let frame = WireFrame::new(2, 1, vec![0_u8; 1280]).unwrap();
+        assert_eq!(frame.encode().unwrap().len(), HEADER_LEN + 1280);
     }
 
     #[test]
