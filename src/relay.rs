@@ -16,7 +16,7 @@ use crate::wire::WireFrame;
 
 const AUTH_STREAM_LIMIT: usize = MAX_TICKET_LEN + 256;
 const MAX_NETWORK_PEERS: usize = 100_000;
-const MINECRAFT_PORTS: [u16; 2] = [19132, 19133];
+const MINECRAFT_PORTS: [u16; 3] = [7551, 19132, 19133];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AuthRequest {
@@ -264,4 +264,48 @@ pub async fn authenticate_client(connection: &Connection, ticket: String) -> Res
 
 pub fn bytes(data: &[u8]) -> Bytes {
     Bytes::copy_from_slice(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn claims() -> TicketClaims {
+        TicketClaims {
+            iss: "flipple-control-plane".into(),
+            aud: "flipple-multiplayer-relay".into(),
+            network_id: "public-v1".into(),
+            lease_id: "00000000-0000-4000-8000-000000000001".into(),
+            peer_id: 1,
+            role: "member".into(),
+            virtual_ip: "100.64.0.1".into(),
+            exp: u64::MAX,
+            jti: "test-ticket".into(),
+            protocol_version: 2,
+        }
+    }
+
+    fn udp_packet(source_port: u16, destination_port: u16) -> Vec<u8> {
+        let mut packet = vec![0u8; 28];
+        let packet_len = packet.len() as u16;
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&packet_len.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&[100, 64, 0, 1]);
+        packet[16..20].copy_from_slice(&[100, 64, 0, 2]);
+        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
+        packet[24..26].copy_from_slice(&8u16.to_be_bytes());
+        packet
+    }
+
+    #[test]
+    fn accepts_nethernet_discovery_and_rejects_unrelated_udp() {
+        let nethernet = WireFrame::new(2, 1, bytes(&udp_packet(7551, 7551))).unwrap();
+        assert!(validate_routed_packet(&claims(), &nethernet).is_ok());
+
+        let unrelated = WireFrame::new(2, 2, bytes(&udp_packet(9999, 9998))).unwrap();
+        assert!(validate_routed_packet(&claims(), &unrelated).is_err());
+    }
 }
