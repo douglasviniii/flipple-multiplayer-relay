@@ -103,9 +103,3 @@ impl RelayClient {
         self.endpoint.close(VarInt::from_u32(0), b"client stopped");
     }
 }
-
-impl Drop for RelayClient {
-    fn drop(&mut self) {
-        self.close();
-    }
-}

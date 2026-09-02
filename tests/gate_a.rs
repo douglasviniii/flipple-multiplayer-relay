@@ -179,6 +179,12 @@ async fn client_core_uses_caller_owned_udp_sockets_bidirectionally() {
     .await
     .unwrap();
 
+    // JNI clones the session handle for each send/receive/metadata call. A
+    // temporary clone must never own or close the shared QUIC connection.
+    drop(host.clone());
+    drop(guest.clone());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
     let outbound = Bytes::from_static(&[
         0x45, 0, 0, 0x1c, 0, 2, 0, 0, 0x40, 0x11, 0, 0, 100, 64, 0, 1, 100, 64, 0, 2, 0x4a, 0xbc,
         0x4a, 0xbc, 0, 8, 0, 0,

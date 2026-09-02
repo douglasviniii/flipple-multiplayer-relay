@@ -178,7 +178,11 @@ pub extern "system" fn Java_com_seuapp_flipplearcade_MinecraftRelayNative_native
     let result = (|| -> Result<Option<Vec<u8>>> {
         let (runtime, client) = cloned_session(handle)?;
         let duration = Duration::from_millis(u64::try_from(timeout_ms.max(1))?);
-        match runtime.block_on(timeout(duration, client.receive_packet())) {
+        // `tokio::time::timeout` must be created while the Tokio runtime is
+        // entered. Constructing it as an argument to `block_on` happens first
+        // on the JNI caller thread and panics because no timer reactor is
+        // active there, which aborts the entire Android process across FFI.
+        match runtime.block_on(async { timeout(duration, client.receive_packet()).await }) {
             Ok(frame) => Ok(Some(frame?.payload.to_vec())),
             Err(_) => Ok(None),
         }
