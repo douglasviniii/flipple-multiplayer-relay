@@ -16,7 +16,6 @@ use crate::wire::WireFrame;
 
 const AUTH_STREAM_LIMIT: usize = MAX_TICKET_LEN + 256;
 const MAX_NETWORK_PEERS: usize = 100_000;
-const MINECRAFT_PORTS: [u16; 3] = [7551, 19132, 19133];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AuthRequest {
@@ -98,7 +97,7 @@ impl Relay {
             };
             match datagram {
                 Ok(encoded) => {
-                    let frame = match WireFrame::decode(encoded.clone()) {
+                    let frame = match WireFrame::decode(encoded) {
                         Ok(frame) => frame,
                         Err(error) => {
                             warn!(network_id = %claims.network_id, peer_id = claims.peer_id, %error, "invalid frame dropped");
@@ -109,10 +108,20 @@ impl Relay {
                         warn!(network_id = %claims.network_id, peer_id = claims.peer_id, "self-directed frame dropped");
                         continue;
                     }
-                    if let Err(error) = validate_routed_packet(&claims, &frame) {
-                        warn!(network_id = %claims.network_id, peer_id = claims.peer_id, %error, "spoofed or non-Minecraft packet dropped");
-                        continue;
-                    }
+                    let frame = match normalize_routed_packet(&claims, frame) {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            warn!(network_id = %claims.network_id, peer_id = claims.peer_id, %error, "invalid routed packet dropped");
+                            continue;
+                        }
+                    };
+                    let encoded = match frame.encode() {
+                        Ok(encoded) => encoded,
+                        Err(error) => {
+                            warn!(network_id = %claims.network_id, peer_id = claims.peer_id, %error, "normalized frame dropped");
+                            continue;
+                        }
+                    };
                     let target = self.lookup(&claims.network_id, frame.dst_peer).await;
                     if let Some(target) = target {
                         if target
@@ -208,8 +217,8 @@ impl Relay {
     }
 }
 
-fn validate_routed_packet(claims: &TicketClaims, frame: &WireFrame) -> Result<()> {
-    let packet = frame.payload.as_ref();
+fn normalize_routed_packet(claims: &TicketClaims, mut frame: WireFrame) -> Result<WireFrame> {
+    let mut packet = frame.payload.to_vec();
     if packet.len() < 28 || packet[0] >> 4 != 4 {
         bail!("payload is not a complete IPv4 UDP packet");
     }
@@ -225,21 +234,86 @@ fn validate_routed_packet(claims: &TicketClaims, frame: &WireFrame) -> Result<()
     if fragment & 0x3fff != 0 {
         bail!("fragmented packets are not accepted");
     }
-    let source = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
     let destination = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
     let claimed_source: Ipv4Addr = claims.virtual_ip.parse().context("ticket IP is invalid")?;
-    if source != claimed_source || peer_id_for_ip(source)? != claims.peer_id {
-        bail!("packet source does not match authenticated peer");
+    if peer_id_for_ip(claimed_source)? != claims.peer_id {
+        bail!("ticket source does not match authenticated peer");
     }
     if peer_id_for_ip(destination)? != frame.dst_peer {
         bail!("packet destination does not match frame destination");
     }
+    let udp_len = usize::from(u16::from_be_bytes([
+        packet[header_len + 4],
+        packet[header_len + 5],
+    ]));
+    if udp_len < 8 || header_len + udp_len != packet.len() {
+        bail!("UDP length is invalid");
+    }
     let source_port = u16::from_be_bytes([packet[header_len], packet[header_len + 1]]);
     let destination_port = u16::from_be_bytes([packet[header_len + 2], packet[header_len + 3]]);
-    if !MINECRAFT_PORTS.contains(&source_port) && !MINECRAFT_PORTS.contains(&destination_port) {
-        bail!("packet is not using a Minecraft Bedrock LAN port");
+    if source_port == 0 || destination_port == 0 {
+        bail!("UDP port zero is invalid");
     }
-    Ok(())
+
+    // Android's VpnService can retain the Minecraft socket's physical source
+    // address in packets captured by the narrow TUN. The authenticated ticket,
+    // not that untrusted header, is the source of truth. Canonicalizing it here
+    // keeps replies routable while still preventing peer spoofing. NetherNet
+    // negotiates dynamic UDP ports after discovery, so restricting every packet
+    // to 7551/19132/19133 breaks otherwise valid Bedrock sessions.
+    let source = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
+    if source != claimed_source {
+        packet[12..16].copy_from_slice(&claimed_source.octets());
+        refresh_ipv4_udp_checksums(&mut packet, header_len, udp_len);
+    }
+    frame.payload = Bytes::from(packet);
+    Ok(frame)
+}
+
+fn refresh_ipv4_udp_checksums(packet: &mut [u8], header_len: usize, udp_len: usize) {
+    packet[10] = 0;
+    packet[11] = 0;
+    let header_checksum = internet_checksum(&[&packet[..header_len]]);
+    packet[10..12].copy_from_slice(&header_checksum.to_be_bytes());
+
+    let udp_offset = header_len;
+    let had_udp_checksum = packet[udp_offset + 6] != 0 || packet[udp_offset + 7] != 0;
+    if !had_udp_checksum {
+        return;
+    }
+    packet[udp_offset + 6] = 0;
+    packet[udp_offset + 7] = 0;
+    let udp_len_bytes = (udp_len as u16).to_be_bytes();
+    let pseudo_tail = [0_u8, 17_u8];
+    let checksum = internet_checksum(&[
+        &packet[12..20],
+        &pseudo_tail,
+        &udp_len_bytes,
+        &packet[udp_offset..udp_offset + udp_len],
+    ]);
+    let checksum = if checksum == 0 { u16::MAX } else { checksum };
+    packet[udp_offset + 6..udp_offset + 8].copy_from_slice(&checksum.to_be_bytes());
+}
+
+fn internet_checksum(parts: &[&[u8]]) -> u16 {
+    let mut sum = 0_u32;
+    let mut pending = None;
+    for part in parts {
+        for &byte in *part {
+            if let Some(high) = pending.take() {
+                sum += u32::from(u16::from_be_bytes([high, byte]));
+            } else {
+                pending = Some(byte);
+            }
+        }
+    }
+    if let Some(high) = pending {
+        sum += u32::from(u16::from_be_bytes([high, 0]));
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
 }
 
 pub async fn authenticate_client(connection: &Connection, ticket: String) -> Result<AuthResponse> {
@@ -301,11 +375,36 @@ mod tests {
     }
 
     #[test]
-    fn accepts_nethernet_discovery_and_rejects_unrelated_udp() {
+    fn accepts_nethernet_dynamic_ports_and_canonicalizes_source() {
         let nethernet = WireFrame::new(2, 1, bytes(&udp_packet(7551, 7551))).unwrap();
-        assert!(validate_routed_packet(&claims(), &nethernet).is_ok());
+        assert!(normalize_routed_packet(&claims(), nethernet).is_ok());
 
-        let unrelated = WireFrame::new(2, 2, bytes(&udp_packet(9999, 9998))).unwrap();
-        assert!(validate_routed_packet(&claims(), &unrelated).is_err());
+        let dynamic = WireFrame::new(2, 2, bytes(&udp_packet(49_152, 37_777))).unwrap();
+        assert!(normalize_routed_packet(&claims(), dynamic).is_ok());
+
+        let mut physical_source = udp_packet(49_152, 37_777);
+        physical_source[12..16].copy_from_slice(&[192, 168, 1, 25]);
+        let normalized = normalize_routed_packet(
+            &claims(),
+            WireFrame::new(2, 3, bytes(&physical_source)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(&normalized.payload[12..16], &[100, 64, 0, 1]);
+    }
+
+    #[test]
+    fn refreshes_ipv4_and_nonzero_udp_checksums_after_source_rewrite() {
+        let mut packet = udp_packet(49_152, 37_777);
+        packet[12..16].copy_from_slice(&[100, 64, 0, 1]);
+        packet[26..28].copy_from_slice(&u16::MAX.to_be_bytes());
+        refresh_ipv4_udp_checksums(&mut packet, 20, 8);
+
+        assert_eq!(internet_checksum(&[&packet[..20]]), 0);
+        let pseudo_tail = [0_u8, 17_u8];
+        let udp_len = 8_u16.to_be_bytes();
+        assert_eq!(
+            internet_checksum(&[&packet[12..20], &pseudo_tail, &udp_len, &packet[20..28]]),
+            0,
+        );
     }
 }

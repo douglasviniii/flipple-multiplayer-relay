@@ -92,11 +92,13 @@ async fn gate_a_routes_raw_ip_datagrams_in_both_directions() {
             .unwrap(),
     )
     .unwrap();
-    assert!(
-        timeout(Duration::from_millis(150), guest.read_datagram())
-            .await
-            .is_err()
-    );
+    let received = timeout(Duration::from_secs(2), guest.read_datagram())
+        .await
+        .expect("canonicalized datagram timed out")
+        .unwrap();
+    let canonicalized = WireFrame::decode(received).unwrap();
+    assert_eq!(canonicalized.dst_peer, 2);
+    assert_eq!(&canonicalized.payload[12..16], &[100, 64, 0, 1]);
 
     let host_packet = Bytes::from_static(&[
         0x45, 0x00, 0x00, 0x1c, 0, 0, 0, 0, 0x40, 0x11, 0, 0, 100, 64, 0, 1, 100, 64, 0, 2, 0x4a,
